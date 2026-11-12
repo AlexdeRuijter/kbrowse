@@ -136,6 +136,51 @@ class JsTests(unittest.TestCase):
         self.assertNotIn("eval(", kb.js_program("x", False))
 
 
+class CommandTableTests(unittest.TestCase):
+    def test_every_command_has_a_handler(self):
+        for name in kb.COMMANDS:
+            self.assertTrue(callable(getattr(kb.App, "cmd_" + name.replace("-", "_"), None)), name)
+        for alias, target in kb.ALIASES.items():
+            self.assertIn(target, kb.COMMANDS, alias)
+
+    def test_every_binding_names_a_command(self):
+        for keys, line in kb.KEYS.items():
+            name = line.split(" ", 1)[0]
+            self.assertIn(kb.ALIASES.get(name, name), kb.COMMANDS, keys)
+
+    def make_app(self):
+        import argparse
+        app = kb.App(argparse.Namespace(scale=1.0))
+        ran, sent = [], []
+        app.run_command = ran.append
+        app.send_key = sent.append
+        return app, ran, sent
+
+    def test_keys_dispatch(self):
+        app, ran, sent = self.make_app()
+        for key in [kb.Key("j"), kb.Key("g"), kb.Key("g"), kb.Key("g"), kb.Key("i"),
+                    kb.Key("d", kb.Key.CTRL), kb.Key("Escape"), kb.Key("y"), kb.Key("x"), kb.Key("w")]:
+            app.normal_key(key)
+        # "gg" scrolls to the top, "gi" focuses input, "y" then "x" is no binding
+        self.assertEqual(ran, ["scroll down", "scroll top", "focus-input", "scroll-page 0.5"])
+        self.assertEqual([k.name for k in sent], ["Escape"])
+
+    def test_history_method_is_not_shadowed(self):
+        app, _ran, _sent = self.make_app()
+        self.assertTrue(callable(app.history))  # H/L call it; prompt history lives elsewhere
+
+    def test_prompt_text_keeps_trailing_space(self):
+        app, _ran, _sent = self.make_app()
+        app.tabs["t1"] = kb.Tab("t1", "https://example.com/")
+        app.active = "t1"
+        app.cmd_cmd_set_text(":open ")
+        self.assertEqual(app.prompt, ["cmd", "open ", 5])
+        app.cmd_cmd_set_text(":open -t {url}")
+        self.assertEqual(app.prompt[1], "open -t https://example.com/")
+        app.cmd_cmd_set_text("/")
+        self.assertEqual(app.prompt[0], "search")
+
+
 class UrlTests(unittest.TestCase):
     def test_to_url(self):
         search = "https://duckduckgo.com/?q={}"
