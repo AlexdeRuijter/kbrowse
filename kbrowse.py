@@ -668,6 +668,16 @@ e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('ch
 SELECTION_JS = "String(getSelection())"
 
 
+_CONTROL = re.compile("[\x00-\x1f\x7f-\x9f]")
+
+
+def printable(text):
+    """Page-supplied text (alerts, titles, menu options) with control
+    characters replaced, so a page cannot send escape sequences to the
+    terminal (e.g. OSC 52 to overwrite the clipboard)."""
+    return _CONTROL.sub(" ", str(text))
+
+
 def js_string(text):
     return json.dumps(text)
 
@@ -1179,7 +1189,7 @@ class App:
         if cursor is not None and cursor >= self.cols:
             cut = cursor - self.cols + 1
             left, cursor = left[cut:], cursor - cut
-        line = left[: self.cols].ljust(self.cols)
+        line = printable(left)[: self.cols].ljust(self.cols)
         out = f"\x1b[{self.rows};1H\x1b[0;7m{line}\x1b[0m"
         if cursor is not None:
             out += f"\x1b[{self.rows};{cursor + 1}H\x1b[?25h"
@@ -1857,7 +1867,7 @@ class App:
         for i in range(height):
             index = menu["top"] + i
             text, disabled = menu["opts"][index]
-            line = (" " + text)[: width].ljust(width)
+            line = printable(" " + text)[: width].ljust(width)
             if index == menu["cursor"]:
                 style = "\x1b[0;97;48;2;40;100;200;1m"
             elif disabled:
