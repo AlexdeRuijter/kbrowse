@@ -58,8 +58,11 @@ kbrowse uses qutebrowser-style modes. In **normal mode**, keys drive the browser
 | `J` `K` (or `gt` `gT`) | Next / previous tab |
 | `d` | Close tab |
 | `yy` `yt` `ys` | Copy URL / title / selected text (to your Mac clipboard, over ssh) |
-| `:` | Commands: `open`, `tabopen`, `back`, `forward`, `reload`, `close`, `js`, `version`, `q`. Up/Down recall earlier entries |
+| `:` | Run a command, for example `:open -t example.com` or `:js document.title`. Up/Down recall earlier entries |
+| `:help` | List all commands and key bindings |
 | `:q`, `ZZ`, `Ctrl-q` | Quit |
+
+Every key runs a `:` command, as in qutebrowser. The bindings are in the `KEYS` table at the top of the command section in `kbrowse.py`.
 
 The mouse works as you would expect: click, drag, wheel, and hover. Dropdowns (`<select>`) open as a kbrowse menu, where you pick with `j`/`k` and Enter or with a click. JavaScript alerts and confirms show in the status line. Pasting with Cmd-V goes into the focused field. Pop-up windows, such as sign-in windows, open as a tab and close back to the page that opened them.
 

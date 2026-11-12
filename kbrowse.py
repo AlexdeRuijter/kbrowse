@@ -1117,6 +1117,73 @@ def to_url(text, search):
     return ("http://" if text.startswith("localhost") else "https://") + text
 
 
+# --------------------------------------------------------------------------
+# Commands and key bindings
+#
+# Every action is a `:` command; normal-mode keys are bound to command lines,
+# like in qutebrowser. Each command NAME is handled by App.cmd_NAME (with -
+# turned into _).
+
+COMMANDS = {
+    # name: (arguments, help)
+    "open": ("[-t] URL|SEARCH", "Open a URL or search for text; -t opens a new tab"),
+    "tabopen": ("[URL|SEARCH]", "Open a new tab"),
+    "back": ("", "Go back in history"),
+    "forward": ("", "Go forward in history"),
+    "reload": ("[-f]", "Reload the page; -f skips the cache"),
+    "close": ("", "Close the current tab"),
+    "tab-next": ("", "Switch to the next tab"),
+    "tab-prev": ("", "Switch to the previous tab"),
+    "scroll": ("up|down|left|right|top|bottom [COUNT]", "Scroll the page"),
+    "scroll-page": ("FRACTION", "Scroll by a fraction of the screen; negative goes up"),
+    "hint": ("[tab]", "Show link hints; tab opens links in a new tab"),
+    "insert": ("", "Enter insert mode: keys go to the page until Esc"),
+    "focus-input": ("", "Focus the first text field and enter insert mode"),
+    "search-next": ("", "Find the next match"),
+    "search-prev": ("", "Find the previous match"),
+    "yank": ("url|title|selection", "Copy to the clipboard of the machine running kitty"),
+    "js": ("[-main] CODE | [-main] -f SCRIPT", "Run JavaScript in the page (see README)"),
+    "cmd-set-text": ("TEXT", "Open the prompt with TEXT; {url} is the current URL"),
+    "version": ("", "Show the Chromium version"),
+    "help": ("", "List commands and key bindings"),
+    "quit": ("", "Quit kbrowse"),
+}
+
+ALIASES = {"o": "open", "t": "tabopen", "open-t": "tabopen", "r": "reload", "tab-close": "close",
+           "q": "quit", "qa": "quit", "wq": "quit", "x": "quit"}
+
+# Keys: a character, a key name ("Down", "F5"), "<Ctrl-x>", or two characters.
+KEYS = {
+    "j": "scroll down", "Down": "scroll down", "k": "scroll up", "Up": "scroll up",
+    "h": "scroll left", "l": "scroll right", "gg": "scroll top", "G": "scroll bottom",
+    "<Ctrl-d>": "scroll-page 0.5", "<Ctrl-u>": "scroll-page -0.5",
+    "<Ctrl-f>": "scroll-page 1", "<Ctrl-b>": "scroll-page -1",
+    " ": "scroll-page 1", "PageDown": "scroll-page 1", "PageUp": "scroll-page -1",
+    "H": "back", "L": "forward", "r": "reload", "F5": "reload", "R": "reload -f",
+    "o": "cmd-set-text :open ", "O": "cmd-set-text :open -t ", "t": "cmd-set-text :open -t ",
+    "go": "cmd-set-text :open {url}", "gO": "cmd-set-text :open -t {url}",
+    ":": "cmd-set-text :", "/": "cmd-set-text /", "?": "cmd-set-text ?",
+    "n": "search-next", "N": "search-prev",
+    "f": "hint", "F": "hint tab", "i": "insert", "gi": "focus-input",
+    "yy": "yank url", "yt": "yank title", "ys": "yank selection",
+    "J": "tab-next", "gt": "tab-next", "K": "tab-prev", "gT": "tab-prev", "d": "close",
+    "ZZ": "quit", "ZQ": "quit",
+}
+
+# Keys that normal mode passes on to the page.
+PASSTHROUGH = {"Escape", "Enter", "Tab", "Left", "Right", "Home", "End", "Backspace", "Delete",
+               "<Ctrl-a>", "<Ctrl-c>", "<Ctrl-v>", "<Ctrl-x>", "<Ctrl-z>"}
+
+
+def key_label(key):
+    """The name of a key as used in KEYS."""
+    if key.mods & Key.CTRL:
+        return f"<Ctrl-{key.name.lower() if len(key.name) == 1 else key.name}>"
+    if key.mods & (Key.ALT | Key.SUPER):
+        return None
+    return key.name
+
+
 class App:
     def __init__(self, args):
         self.args = args
@@ -1146,7 +1213,7 @@ class App:
         self.overlay_cells = []
         self.closing = set()
         self.frame_due = None
-        self.history = {}  # prompt kind -> earlier entries, for Up/Down
+        self.prompt_history = {}  # prompt kind -> earlier entries, for Up/Down
         self.history_pos = None
         self.output = None  # :js output pane: {"lines": [...], "top": int}
         self.next_poll = 0
@@ -1247,7 +1314,7 @@ class App:
             left = text
         elif self.prompt:
             kind, text, pos = self.prompt
-            prefix = {"open": ":open ", "tabopen": ":open -t ", "search": "/", "rsearch": "?", "cmd": ":"}[kind]
+            prefix = {"search": "/", "rsearch": "?", "cmd": ":"}[kind]
             left = prefix + text
             cursor = len(prefix) + pos
         else:
@@ -1673,96 +1740,151 @@ class App:
         self.mouse("mouseMoved", x, y, button, self.button_mask(), mods=event.mods)
 
     def normal_key(self, key):
-        page = max(self.image_rows - 2, 1) * self.row_css()
-        seq = self.pending + key.name if len(key.name) == 1 and not key.mods & (Key.CTRL | Key.ALT) else None
-        self.pending = ""
         self.status_dirty = True
-        two = {"gg", "go", "gO", "gi", "gt", "gT", "yy", "yt", "ys", "ZZ", "ZQ"}
-        if seq and seq in two:
-            return self.normal_command(seq)
-        if seq and any(b.startswith(seq) for b in two) and len(seq) == 1:
-            self.pending = seq
-            return None
-        if key.mods & Key.CTRL:
-            commands = {"d": lambda: self.wheel(0, page / 2), "u": lambda: self.wheel(0, -page / 2),
-                        "f": lambda: self.wheel(0, page), "b": lambda: self.wheel(0, -page)}
-            if key.name.lower() in commands:
-                return commands[key.name.lower()]()
-            return self.send_key(key) if key.name.lower() in "acvxz" else None
-        if key.name in ("Escape", "Enter", "Tab", "Left", "Right", "Home", "End", "Backspace", "Delete"):
-            return self.send_key(key)
-        return self.normal_command(key.name)
-        if key.name in ("Escape", "Enter", "Tab"):
-            return self.send_key(key)
-        return self.normal_command(key.name)
+        label = key_label(key)
+        pending, self.pending = self.pending, ""
+        if label is None:
+            return
+        for keys in ([pending + label] if pending and len(label) == 1 else []) + [label]:
+            if keys in KEYS:
+                return self.run_command(KEYS[keys])
+            if len(keys) == 1 and any(len(k) == 2 and k.startswith(keys) for k in KEYS):
+                self.pending = keys  # first key of a two-key binding
+                return
+        if label in PASSTHROUGH:
+            self.send_key(key)
 
-    def normal_command(self, name):
-        row = self.row_css()
-        page = max(self.image_rows - 2, 1) * row
-        tab = self.tab
-        if name in ("j", "Down"):
-            self.wheel(0, 3 * row)
-        elif name in ("k", "Up"):
-            self.wheel(0, -3 * row)
-        elif name == "h":
-            self.wheel(-6 * self.cell_w * self.css_per_px()[0], 0)
-        elif name == "l":
-            self.wheel(6 * self.cell_w * self.css_per_px()[0], 0)
-        elif name in (" ", "PageDown"):
-            self.wheel(0, page)
-        elif name == "PageUp":
-            self.wheel(0, -page)
-        elif name == "gg":
-            self.evaluate("scrollTo(scrollX,0)")
-        elif name == "G":
-            self.evaluate("scrollTo(scrollX,document.scrollingElement?document.scrollingElement.scrollHeight:1e9)")
-        elif name == "H":
-            self.history(-1)
-        elif name == "L":
-            self.history(1)
-        elif name in ("r", "F5"):
-            self.cdp.send("Page.reload", {}, self.session())
-        elif name == "R":
-            self.cdp.send("Page.reload", {"ignoreCache": True}, self.session())
-        elif name == "o":
-            self.prompt = ["open", "", 0]
-        elif name in ("O", "t"):
-            self.prompt = ["tabopen", "", 0]
-        elif name == "go" and tab:
-            self.prompt = ["open", tab.url, len(tab.url)]
-        elif name == "gO" and tab:
-            self.prompt = ["tabopen", tab.url, len(tab.url)]
-        elif name == ":":
-            self.prompt = ["cmd", "", 0]
-        elif name in ("/", "?"):
-            self.prompt = ["search" if name == "/" else "rsearch", "", 0]
-        elif name in ("n", "N") and self.search:
-            text, backwards = self.search
-            self.find(text, backwards ^ (name == "N"))
-        elif name in ("f", "F"):
-            self.start_hints(newtab=name == "F")
-        elif name == "i":
-            self.set_mode("insert")
-        elif name == "gi":
-            if self.evaluate(FOCUS_INPUT_JS):
-                self.set_mode("insert")
-            else:
-                self.flash("No text field on this page")
-        elif name == "yy" and tab:
-            self.yank(tab.url, "URL")
-        elif name == "yt" and tab:
-            self.yank(tab.title, "title")
-        elif name == "ys":
-            self.yank(self.evaluate(SELECTION_JS), "selection")
-        elif name in ("J", "gt"):
-            self.cycle_tab(1)
-        elif name in ("K", "gT"):
-            self.cycle_tab(-1)
-        elif name == "d":
-            self.close_tab()
-        elif name in ("ZZ", "ZQ"):
-            self.quit = True
+    def run_command(self, line):
+        """Run a command line such as "open -t example.com"."""
+        name, _, rest = line.lstrip().partition(" ")
+        name = ALIASES.get(name, name)
         self.status_dirty = True
+        if not name:
+            return
+        if name not in COMMANDS:
+            self.flash(f"Unknown command: {name}")
+            return
+        getattr(self, "cmd_" + name.replace("-", "_"))(rest)
+
+    # ---- commands --------------------------------------------------------
+
+    def cmd_open(self, rest):
+        newtab = rest.startswith("-t ") or rest.strip() == "-t"
+        target = rest.strip()[2:].strip() if newtab else rest.strip()
+        if newtab:
+            self.cmd_tabopen(target)
+        elif target:
+            self.navigate(to_url(target, self.args.search))
+
+    def cmd_tabopen(self, rest):
+        self.navigate(to_url(rest.strip() or "about:blank", self.args.search), True)
+
+    def cmd_back(self, _rest):
+        self.history(-1)
+
+    def cmd_forward(self, _rest):
+        self.history(1)
+
+    def cmd_reload(self, rest):
+        self.cdp.send("Page.reload", {"ignoreCache": rest.strip() == "-f"}, self.session())
+
+    def cmd_close(self, _rest):
+        self.close_tab()
+
+    def cmd_tab_next(self, _rest):
+        self.cycle_tab(1)
+
+    def cmd_tab_prev(self, _rest):
+        self.cycle_tab(-1)
+
+    def cmd_scroll(self, rest):
+        words = rest.split()
+        direction = words[0] if words else "down"
+        try:
+            count = float(words[1]) if len(words) > 1 else 1.0
+        except ValueError:
+            count = 1.0
+        row = self.row_css()
+        column = self.cell_w * self.css_per_px()[0]
+        if direction == "top":
+            self.evaluate("scrollTo(scrollX,0)")
+        elif direction == "bottom":
+            self.evaluate("scrollTo(scrollX,document.scrollingElement?document.scrollingElement.scrollHeight:1e9)")
+        else:
+            dx, dy = {"down": (0, 3 * row), "up": (0, -3 * row),
+                      "left": (-6 * column, 0), "right": (6 * column, 0)}.get(direction, (0, 0))
+            self.wheel(dx * count, dy * count)
+
+    def cmd_scroll_page(self, rest):
+        try:
+            fraction = float(rest.strip() or 1)
+        except ValueError:
+            return self.flash(f"scroll-page: not a number: {rest}")
+        self.wheel(0, fraction * max(self.image_rows - 2, 1) * self.row_css())
+
+    def cmd_hint(self, rest):
+        self.start_hints(newtab=rest.strip() == "tab")
+
+    def cmd_insert(self, _rest):
+        self.set_mode("insert")
+
+    def cmd_focus_input(self, _rest):
+        if self.evaluate(FOCUS_INPUT_JS):
+            self.set_mode("insert")
+        else:
+            self.flash("No text field on this page")
+
+    def cmd_search_next(self, _rest):
+        if self.search:
+            self.find(self.search[0], self.search[1])
+
+    def cmd_search_prev(self, _rest):
+        if self.search:
+            self.find(self.search[0], not self.search[1])
+
+    def cmd_yank(self, rest):
+        what = rest.strip() or "url"
+        tab = self.tab
+        if what == "url" and tab:
+            self.yank(tab.url, "URL")
+        elif what == "title" and tab:
+            self.yank(tab.title, "title")
+        elif what == "selection":
+            self.yank(self.evaluate(SELECTION_JS), "selection")
+
+    def cmd_js(self, rest):
+        self.js_command(rest)
+
+    def cmd_cmd_set_text(self, rest):
+        tab = self.tab
+        text = rest.replace("{url}", tab.url if tab else "")
+        kind = {":": "cmd", "/": "search", "?": "rsearch"}.get(text[:1])
+        if kind:
+            self.prompt = [kind, text[1:], len(text) - 1]
+            self.history_pos = None
+
+    def cmd_version(self, _rest):
+        version = self.cdp.call("Browser.getVersion")
+        self.flash(f"{version.get('product')}  ({version.get('userAgent')})", 10)
+
+    def cmd_help(self, _rest):
+        lines = ["Commands (type : then the command):", ""]
+        for name, (arguments, text) in COMMANDS.items():
+            aliases = sorted(a for a, target in ALIASES.items() if target == name)
+            usage = f"{name} {arguments}".strip() + (f"  (also: {', '.join(aliases)})" if aliases else "")
+            lines.append(f"  {usage}")
+            lines.append(f"      {text}")
+        lines += ["", "Keys in normal mode:", ""]
+        for keys, command in KEYS.items():
+            lines.append(f"  {'Space' if keys == ' ' else keys:<10} {command}")
+        lines += ["", "Esc leaves insert mode. Ctrl-q quits from any mode."]
+        self.show_output(lines)
+        if self.output:
+            self.output["top"] = 0
+            self.draw_output()
+
+    def cmd_quit(self, _rest):
+        self.quit = True
 
     def find(self, text, backwards):
         found = self.evaluate(f"window.find({js_string(text)},false,{str(backwards).lower()},true)")
@@ -1781,14 +1903,14 @@ class App:
         if key.is_("Enter"):
             self.prompt = None
             self.history_pos = None
-            past = self.history.setdefault(kind, [])
+            past = self.prompt_history.setdefault(kind, [])
             if text.strip() and (not past or past[-1] != text):
                 past.append(text)
                 del past[:-200]
             self.run_prompt(kind, text)
             return
         if key.name in ("Up", "Down") and not key.mods:
-            past = self.history.get(kind, [])
+            past = self.prompt_history.get(kind, [])
             if past:
                 pos = len(past) if self.history_pos is None else self.history_pos
                 pos = max(0, min(pos + (-1 if key.name == "Up" else 1), len(past)))
@@ -1825,39 +1947,12 @@ class App:
         self.prompt = [kind, text, pos]
 
     def run_prompt(self, kind, text):
-        if kind in ("open", "tabopen"):
-            if text.strip():
-                self.navigate(to_url(text, self.args.search), kind == "tabopen")
-        elif kind in ("search", "rsearch"):
+        if kind in ("search", "rsearch"):
             if text:
                 self.search = (text, kind == "rsearch")
                 self.find(text, kind == "rsearch")
         elif kind == "cmd":
-            command, _, rest = text.strip().partition(" ")
-            if command in ("o", "open"):
-                newtab = rest.startswith("-t ")
-                rest = rest[3:] if newtab else rest
-                if rest.strip():
-                    self.navigate(to_url(rest, self.args.search), newtab)
-            elif command in ("t", "tabopen", "open-t"):
-                self.navigate(to_url(rest or "about:blank", self.args.search), True)
-            elif command in ("q", "quit", "qa", "wq", "x"):
-                self.quit = True
-            elif command in ("back",):
-                self.history(-1)
-            elif command in ("forward",):
-                self.history(1)
-            elif command in ("reload", "r"):
-                self.cdp.send("Page.reload", {}, self.session())
-            elif command in ("tab-close", "close"):
-                self.close_tab()
-            elif command == "js":
-                self.js_command(rest)
-            elif command in ("version",):
-                version = self.cdp.call("Browser.getVersion")
-                self.flash(f"{version.get('product')}  ({version.get('userAgent')})", 10)
-            elif command:
-                self.flash(f"Unknown command: {command}")
+            self.run_command(text)
 
     # ---- :js ----------------------------------------------------------------
 
