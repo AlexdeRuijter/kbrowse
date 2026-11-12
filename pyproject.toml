@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kbrowse"
+version = "0.1.0"
+description = "A keyboard-driven browser for the kitty terminal, built on a stock modern Chromium. Works over ssh."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { file = "LICENSE" }
+classifiers = [
+    "Environment :: Console",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Internet :: WWW/HTTP :: Browsers",
+]
+
+[project.urls]
+Homepage = "https://github.com/AlexdeRuijter/kbrowse"
+
+[project.scripts]
+kbrowse = "kbrowse:main"
+
+[tool.setuptools]
+py-modules = ["kbrowse"]
