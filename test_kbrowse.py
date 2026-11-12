@@ -75,6 +75,15 @@ class CrxTests(unittest.TestCase):
             kb.crx_to_zip(b"nope")
 
 
+class PrintableTests(unittest.TestCase):
+    def test_escape_sequences_are_neutralised(self):
+        text = kb.printable("D\x1b]52;c;aGk=\x07E\x9b31m")
+        self.assertNotIn("\x1b", text)
+        self.assertNotIn("\x07", text)
+        self.assertNotIn("\x9b", text)
+        self.assertEqual(kb.printable("héllo wörld"), "héllo wörld")
+
+
 class UrlTests(unittest.TestCase):
     def test_to_url(self):
         search = "https://duckduckgo.com/?q={}"
