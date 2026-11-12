@@ -678,6 +678,80 @@ def printable(text):
     return _CONTROL.sub(" ", str(text))
 
 
+# --------------------------------------------------------------------------
+# :js — run your own JavaScript in the page, like the DevTools console
+
+JS_WRAPPER = """(async function () {
+  const __out = [];
+  const __fmt = function (v) {
+    if (typeof v === "string") return v;
+    if (v === undefined) return "undefined";
+    if (typeof v === "function" || typeof v === "symbol" || typeof v === "bigint") return String(v);
+    if (v instanceof Error) return v.stack || String(v);
+    if (typeof Node !== "undefined" && v instanceof Node) return v.outerHTML ? v.outerHTML.slice(0, 2000) : v.nodeName;
+    try { const j = JSON.stringify(v, null, 2); return j === undefined ? String(v) : j; } catch (e) { return String(v); }
+  };
+  const __log = function (prefix) {
+    return function () { __out.push(prefix + Array.prototype.map.call(arguments, __fmt).join(" ")); };
+  };
+  // Shadows the page's console, so output comes back to kbrowse without
+  // Runtime.enable (which bot checks can detect).
+  const console = {log: __log(""), info: __log(""), debug: __log(""), dir: __log(""), table: __log(""),
+                   warn: __log("warning: "), error: __log("error: ")};
+  try {
+    const __r = await (async () => {
+%s
+    })();
+    return {out: __out, result: __fmt(__r), ok: true};
+  } catch (e) {
+    return {out: __out, result: __fmt(e), ok: false};
+  }
+})()"""
+
+
+def js_program(code, expression):
+    """Wrap user code. As an expression its value is the result (and it may
+    use await); as statements the result is whatever it `return`s. The code
+    is pasted into the function rather than passed to eval(), so a page's
+    Content-Security-Policy cannot block it."""
+    body = f"return (\n{code}\n);" if expression else code
+    return JS_WRAPPER % body
+
+
+def scripts_folder():
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return os.path.join(base, "kbrowse", "scripts")
+
+
+def script_path(name):
+    """The file for `:js -f NAME`, after checking that nobody else could have
+    put or changed it there: a script runs with access to every site you are
+    signed in to."""
+    folder = scripts_folder()
+    if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", name):
+        raise ValueError(f"bad script name: {name}")
+    if not name.endswith(".js"):
+        name += ".js"
+    path = os.path.realpath(os.path.join(folder, name))
+    real_folder = os.path.realpath(folder)
+    if os.path.dirname(path) != real_folder:
+        raise ValueError(f"{name} points outside {folder}")
+    for checked in (real_folder, path):
+        info = os.stat(checked)
+        if info.st_uid != os.getuid():
+            raise ValueError(f"{checked} is not owned by you")
+        if info.st_mode & 0o022:
+            raise ValueError(f"{checked} is writable by other users (chmod go-w)")
+    return path
+
+
+def list_scripts():
+    try:
+        return sorted(n[:-3] for n in os.listdir(scripts_folder()) if n.endswith(".js"))
+    except OSError:
+        return []
+
+
 def js_string(text):
     return json.dumps(text)
 
@@ -1072,6 +1146,9 @@ class App:
         self.overlay_cells = []
         self.closing = set()
         self.frame_due = None
+        self.history = {}  # prompt kind -> earlier entries, for Up/Down
+        self.history_pos = None
+        self.output = None  # :js output pane: {"lines": [...], "top": int}
         self.next_poll = 0
         self.settle_until = 0
         self.wake_r, self.wake_w = os.pipe()
@@ -1175,6 +1252,8 @@ class App:
             cursor = len(prefix) + pos
         else:
             label = {"insert": "-- INSERT -- ", "hint": "-- HINT -- ", "menu": "-- SELECT -- "}.get(self.mode, "")
+            if self.output:
+                label = "-- OUTPUT -- (q: close, j/k: scroll, y: copy) "
             message, until = self.message
             if message and time.time() < until:
                 left = label + message
@@ -1457,10 +1536,11 @@ class App:
     # ---- modes -----------------------------------------------------------
 
     def leave_modes(self):
-        if self.hints or self.menu:
+        if self.hints or self.menu or self.output:
             self.clear_overlay()
         self.hints = None
         self.menu = None
+        self.output = None
         self.prompt = None
         self.pending = ""
         if self.mode != "normal":
@@ -1499,6 +1579,8 @@ class App:
                 self.hint_key(event)
             elif self.menu:
                 self.menu_key(event)
+            elif self.output:
+                self.output_key(event)
             elif self.mode == "insert":
                 if event.is_("Escape"):
                     self.set_mode("normal")
@@ -1528,6 +1610,12 @@ class App:
         in_page = event.y <= self.area[1] and event.x <= self.area[0]
         if self.menu and event.kind == "press":
             self.menu_click(event)
+            return
+        if self.output and event.kind in ("press", "wheel"):
+            if event.kind == "wheel" and event.button in (0, 1):
+                self.scroll_output(-3 if event.button == 0 else 3)
+            else:
+                self.leave_modes()
             return
         if not in_page or self.dialog:
             return
@@ -1688,10 +1776,25 @@ class App:
         self.status_dirty = True
         if key.is_("Escape") or (key.is_("Backspace") and not text):
             self.prompt = None
+            self.history_pos = None
             return
         if key.is_("Enter"):
             self.prompt = None
+            self.history_pos = None
+            past = self.history.setdefault(kind, [])
+            if text.strip() and (not past or past[-1] != text):
+                past.append(text)
+                del past[:-200]
             self.run_prompt(kind, text)
+            return
+        if key.name in ("Up", "Down") and not key.mods:
+            past = self.history.get(kind, [])
+            if past:
+                pos = len(past) if self.history_pos is None else self.history_pos
+                pos = max(0, min(pos + (-1 if key.name == "Up" else 1), len(past)))
+                self.history_pos = pos
+                text = past[pos] if pos < len(past) else ""
+                self.prompt = [kind, text, len(text)]
             return
         name = key.name
         if key.mods & Key.CTRL:
@@ -1713,9 +1816,9 @@ class App:
             pos = max(pos - 1, 0)
         elif name == "Right":
             pos = min(pos + 1, len(text))
-        elif name in ("Home", "Up"):
+        elif name == "Home":
             pos = 0
-        elif name in ("End", "Down"):
+        elif name == "End":
             pos = len(text)
         elif key.text:
             text, pos = text[:pos] + key.text + text[pos:], pos + 1
@@ -1748,11 +1851,145 @@ class App:
                 self.cdp.send("Page.reload", {}, self.session())
             elif command in ("tab-close", "close"):
                 self.close_tab()
+            elif command == "js":
+                self.js_command(rest)
             elif command in ("version",):
                 version = self.cdp.call("Browser.getVersion")
                 self.flash(f"{version.get('product')}  ({version.get('userAgent')})", 10)
             elif command:
                 self.flash(f"Unknown command: {command}")
+
+    # ---- :js ----------------------------------------------------------------
+
+    def js_command(self, rest):
+        """:js [-main] CODE  or  :js [-main] -f NAME"""
+        words = rest.split()
+        main = False
+        while words and words[0] in ("-main", "-m"):
+            main = True
+            rest = rest.strip()[len(words.pop(0)):].lstrip()
+        if words and words[0] == "-f":
+            if len(words) < 2:
+                names = list_scripts()
+                self.show_output([f"Scripts in {scripts_folder()}:"] + (names or ["(none)"]))
+                return
+            try:
+                with open(script_path(words[1])) as handle:
+                    code = handle.read()
+            except (OSError, ValueError) as error:
+                self.flash(f":js: {error}", 8)
+                return
+            self.run_js(code, main, expression=False)
+        elif rest.strip():
+            self.run_js(rest, main, expression=True)
+        else:
+            self.flash("Usage: :js [-main] CODE  or  :js [-main] -f SCRIPT", 6)
+
+    def run_js(self, code, main, expression):
+        """Run code without blocking the UI. By default it runs in kbrowse's
+        isolated world: it shares the page's DOM but not its JavaScript, so
+        the page can neither see it nor tamper with it. -main runs it in the
+        page's own world, to reach the page's variables."""
+        tab = self.tab
+        if not tab or not tab.session:
+            return
+        self.flash("running…", 30)
+
+        def evaluate(context):
+            params = {"expression": js_program(code, expression), "awaitPromise": True,
+                      "returnByValue": True, "silent": True, "userGesture": True}
+            if context:
+                params["contextId"] = context
+            self.cdp.send("Runtime.evaluate", params, tab.session, done)
+
+        def done(reply):
+            result = reply.get("result", {})
+            details = result.get("exceptionDetails")
+            if details and expression:
+                # Not an expression (several statements, say): run it as a
+                # function body instead.
+                self.run_js(code, main, expression=False)
+                return
+            if "error" in reply:
+                self.show_js_result([], reply["error"].get("message", "failed"), False)
+            elif details:
+                text = (details.get("exception") or {}).get("description") or details.get("text", "error")
+                self.show_js_result([], text, False)
+            else:
+                value = result.get("result", {}).get("value") or {}
+                self.show_js_result(value.get("out", []), value.get("result", ""), value.get("ok", False))
+
+        if main:
+            evaluate(None)
+        else:
+            self.cdp.send("Page.createIsolatedWorld", {"frameId": tab.id, "worldName": "kbrowse",
+                                                       "grantUniveralAccess": False}, tab.session,
+                          lambda reply: evaluate(reply.get("result", {}).get("executionContextId")))
+
+    def show_js_result(self, out, result, ok):
+        lines = list(out)
+        if not ok:
+            lines.append("error: " + str(result))
+        elif result != "undefined" or not out:
+            lines.append("=> " + str(result))
+        text = "\n".join(lines)
+        self.message = ("", 0)
+        if "\n" not in text and len(text) < self.cols - 20:
+            self.flash(printable(text), 10)
+        else:
+            self.show_output(text.split("\n"))
+
+    def show_output(self, lines):
+        """A pane over the bottom half of the page. Esc or q closes it,
+        j/k scroll, yy copies everything."""
+        width = max(self.cols - 2, 10)
+        wrapped = []
+        for line in lines[:5000]:
+            line = printable(line.expandtabs(4))
+            wrapped += [line[i:i + width] for i in range(0, max(len(line), 1), width)]
+        self.leave_modes()
+        self.output = {"lines": wrapped, "raw": "\n".join(lines), "top": max(len(wrapped) - self.output_height(), 0)}
+        self.status_dirty = True
+        self.draw_output()
+
+    def output_height(self):
+        return max(min(self.image_rows // 2, self.image_rows - 2), 3)
+
+    def draw_output(self):
+        self.clear_overlay()
+        height = self.output_height()
+        first = self.image_rows - height + 1
+        lines = self.output["lines"][self.output["top"]:self.output["top"] + height]
+        style = "\x1b[0;97;48;2;30;30;30m"
+        out = [self.put_overlay(first + i, 1, (" " + (lines[i] if i < len(lines) else "")).ljust(self.cols), style)
+               for i in range(height)]
+        self.write("".join(out))
+
+    def scroll_output(self, step):
+        output = self.output
+        output["top"] = max(0, min(output["top"] + step, len(output["lines"]) - self.output_height()))
+        self.draw_output()
+
+    def output_key(self, key):
+        if key.is_("Escape") or key.is_("q") or key.is_("Enter"):
+            self.leave_modes()
+        elif key.name in ("j", "Down"):
+            self.scroll_output(1)
+        elif key.name in ("k", "Up"):
+            self.scroll_output(-1)
+        elif key.name in (" ", "PageDown") or key.is_("d", Key.CTRL):
+            self.scroll_output(self.output_height() - 1)
+        elif key.name == "PageUp" or key.is_("u", Key.CTRL):
+            self.scroll_output(1 - self.output_height())
+        elif key.name == "g":
+            self.scroll_output(-len(self.output["lines"]))
+        elif key.name == "G":
+            self.scroll_output(len(self.output["lines"]))
+        elif key.name == "y":
+            self.yank(self.output["raw"], "output")
+        elif key.name == ":":
+            self.leave_modes()
+            self.prompt = ["cmd", "", 0]
 
     # ---- dialogs -----------------------------------------------------------
 

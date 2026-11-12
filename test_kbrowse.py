@@ -84,6 +84,58 @@ class PrintableTests(unittest.TestCase):
         self.assertEqual(kb.printable("héllo wörld"), "héllo wörld")
 
 
+class JsTests(unittest.TestCase):
+    def setUp(self):
+        import os
+        import tempfile
+        self.home = tempfile.mkdtemp()
+        self.folder = os.path.join(self.home, "kbrowse", "scripts")
+        os.makedirs(self.folder)
+        os.chmod(self.folder, 0o755)
+        self.old = os.environ.get("XDG_CONFIG_HOME")
+        os.environ["XDG_CONFIG_HOME"] = self.home
+
+    def tearDown(self):
+        import os
+        import shutil
+        shutil.rmtree(self.home)
+        if self.old is None:
+            os.environ.pop("XDG_CONFIG_HOME", None)
+        else:
+            os.environ["XDG_CONFIG_HOME"] = self.old
+
+    def write(self, name, mode=0o644):
+        import os
+        path = os.path.join(self.folder, name)
+        with open(path, "w") as handle:
+            handle.write("return 1")
+        os.chmod(path, mode)
+        return path
+
+    def test_script_path(self):
+        import os
+        path = self.write("ok.js")
+        self.assertEqual(kb.script_path("ok"), os.path.realpath(path))
+        self.assertEqual(kb.list_scripts(), ["ok"])
+        for bad in ("../ok", "/etc/passwd", ".hidden", "a/b"):
+            with self.assertRaises(ValueError):
+                kb.script_path(bad)
+
+    def test_unsafe_files_are_refused(self):
+        import os
+        self.write("open.js", 0o666)
+        with self.assertRaises(ValueError):
+            kb.script_path("open")
+        os.symlink("/etc/hostname", os.path.join(self.folder, "link.js"))
+        with self.assertRaises(ValueError):
+            kb.script_path("link")
+
+    def test_program(self):
+        self.assertIn("return (\n1 + 1\n);", kb.js_program("1 + 1", True))
+        self.assertIn("const console", kb.js_program("x", False))
+        self.assertNotIn("eval(", kb.js_program("x", False))
+
+
 class UrlTests(unittest.TestCase):
     def test_to_url(self):
         search = "https://duckduckgo.com/?q={}"

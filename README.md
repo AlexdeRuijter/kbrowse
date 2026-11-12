@@ -58,10 +58,34 @@ kbrowse uses qutebrowser-style modes. In **normal mode**, keys drive the browser
 | `J` `K` (or `gt` `gT`) | Next / previous tab |
 | `d` | Close tab |
 | `yy` `yt` `ys` | Copy URL / title / selected text (to your Mac clipboard, over ssh) |
-| `:` | Commands: `open`, `tabopen`, `back`, `forward`, `reload`, `close`, `version`, `q` |
+| `:` | Commands: `open`, `tabopen`, `back`, `forward`, `reload`, `close`, `js`, `version`, `q`. Up/Down recall earlier entries |
 | `:q`, `ZZ`, `Ctrl-q` | Quit |
 
 The mouse works as you would expect: click, drag, wheel, and hover. Dropdowns (`<select>`) open as a kbrowse menu, where you pick with `j`/`k` and Enter or with a click. JavaScript alerts and confirms show in the status line. Pasting with Cmd-V goes into the focused field. Pop-up windows, such as sign-in windows, open as a tab and close back to the page that opened them.
+
+## Running JavaScript (`:js`)
+
+`:js` works like a small DevTools console:
+
+```
+:js document.title                      → shows the result in the status line
+:js await fetch("/api").then(r => r.status)
+:js console.log("links:", document.links.length); return 5
+:js -main window.someVariable           → run in the page's own JavaScript world
+:js -f readable                         → run ~/.config/kbrowse/scripts/readable.js
+:js -f                                  → list your scripts
+```
+
+A single expression shows its value, and it can use `await`. Several statements run as a function body, so `return` the value you want to see. `console.log`, `console.warn` and similar calls are captured. Longer output opens in a pane, where `j`/`k` scroll, `y` copies it all, and `q` closes it.
+
+To keep this safe:
+- **Private by default.** Code runs in kbrowse's own isolated world. It shares the page's DOM but none of its JavaScript, so the page can neither see your code nor tamper with what it uses. Use `-main` only when you need the page's own variables; there, the page could notice or interfere.
+- **Not visible to bot checks.** Output is captured without turning on `Runtime.enable`.
+- **Not blocked by the page.** The code is not run through `eval()`, so a page's Content-Security-Policy can't block it.
+- **Only your own script files.** Scripts load from `~/.config/kbrowse/scripts/` only. kbrowse refuses names with `/` or `..`, symlinks out of that folder, and files or a folder that other users can write to. A script runs with access to every site you are signed in to.
+- **No escape codes.** All output is stripped of control characters before it reaches the terminal.
+
+TypeScript isn't supported yet.
 
 ## Options
 
