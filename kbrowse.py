@@ -914,6 +914,81 @@ def install_ublock(folder, chrome_version):
     return folder
 
 
+def start_session_bus(output):
+    """Starts a private D-Bus session bus, like `dbus-run-session` would.
+
+    Chromium expects a session bus, and `flatpak run` refuses to start without
+    one ("Cannot autolaunch D-Bus without X11 $DISPLAY"). There is none under
+    `sudo -iu`, plain ssh or cron. Returns (process, address) or (None, None)."""
+    if not shutil.which("dbus-daemon"):
+        log("no session bus and no dbus-daemon; Chromium may complain")
+        return None, None
+    read_fd, write_fd = os.pipe()
+    try:
+        proc = subprocess.Popen(
+            ["dbus-daemon", "--session", "--nofork", "--nopidfile", f"--print-address={write_fd}"],
+            pass_fds=(write_fd,), stdin=subprocess.DEVNULL, stdout=output, stderr=output,
+            start_new_session=True,
+        )
+    except OSError as error:
+        os.close(read_fd)
+        os.close(write_fd)
+        log("dbus-daemon failed:", error)
+        return None, None
+    os.close(write_fd)
+    address = b""
+    deadline = time.time() + 10
+    while not address.endswith(b"\n") and time.time() < deadline:
+        ready, _, _ = select.select([read_fd], [], [], 0.5)
+        if ready:
+            chunk = os.read(read_fd, 512)
+            if not chunk:
+                break
+            address += chunk
+    os.close(read_fd)
+    if not address.strip():
+        proc.kill()
+        proc.wait()
+        log("dbus-daemon did not print an address")
+        return None, None
+    log("private session bus", address.decode().strip())
+    return proc, address.decode().strip()
+
+
+class StderrToLog:
+    """Points file descriptor 2 at the log (or /dev/null) while the UI runs,
+    so nothing that inherits it, such as D-Bus services or a browser's helper
+    processes, can draw over the page. kbrowse's own messages still reach the
+    terminal through a copy of the old descriptor."""
+
+    def __init__(self, target):
+        self.target = target
+        self.saved = None
+
+    def __enter__(self):
+        sys.stderr.flush()
+        self.saved = os.dup(2)
+        if self.target is subprocess.DEVNULL:
+            fd = os.open(os.devnull, os.O_WRONLY)
+        else:
+            fd = os.dup(self.target.fileno())
+        os.dup2(fd, 2)
+        os.close(fd)
+        self.old_stderr = sys.stderr
+        sys.stderr = os.fdopen(os.dup(self.saved), "w", buffering=1)
+        return self
+
+    def __exit__(self, *_):
+        try:
+            sys.stderr.close()
+        except OSError:
+            pass
+        sys.stderr = self.old_stderr
+        os.dup2(self.saved, 2)
+        os.close(self.saved)
+        return False
+
+
 def start_xvfb(width, height):
     if not shutil.which("Xvfb"):
         sys.exit("kbrowse: Xvfb not found. Install it (sudo apt install xvfb) or use --headless")
@@ -947,6 +1022,8 @@ class Browser:
         self.profile = os.path.expanduser(args.profile or default_profile(self.command, self.flatpak))
         os.makedirs(self.profile, exist_ok=True)
         self.xvfb = None
+        self.dbus = None
+        self.dbus_address = None
         self.proc = None
         self.transport = None
         self.window_css = window_css
@@ -1006,6 +1083,11 @@ class Browser:
                 self.display = display
             env["DISPLAY"] = self.display
             env.pop("WAYLAND_DISPLAY", None)
+        if not env.get("DBUS_SESSION_BUS_ADDRESS"):
+            if self.dbus is None:
+                self.dbus, self.dbus_address = start_session_bus(self.log_file)
+            if self.dbus_address:
+                env["DBUS_SESSION_BUS_ADDRESS"] = self.dbus_address
         if self.flatpak and not env.get("XDG_RUNTIME_DIR"):
             # flatpak run needs this; some ssh sessions do not set it.
             runtime = f"/run/user/{os.getuid()}"
@@ -1079,6 +1161,8 @@ class Browser:
             self.transport.close()
         if kill_xvfb and self.xvfb:
             self.xvfb.terminate()
+        if kill_xvfb and self.dbus:
+            self.dbus.terminate()
 
 
 # --------------------------------------------------------------------------
@@ -2572,19 +2656,20 @@ def main():
         signal.signal(sig, lambda *_: setattr(app, "quit", True) or os.write(app.wake_w, b"q"))
     app.enter_terminal()
     error = None
-    try:
-        app.run()
-    except SystemExit as exit_error:
-        error = exit_error
-    except Exception as exception:  # noqa: BLE001
-        import traceback
-        log(traceback.format_exc())
-        error = exception
-    finally:
+    with StderrToLog(app.browser.log_file):
         try:
-            app.leave_terminal()
+            app.run()
+        except SystemExit as exit_error:
+            error = exit_error
+        except Exception as exception:  # noqa: BLE001
+            import traceback
+            log(traceback.format_exc())
+            error = exception
         finally:
-            app.shutdown()
+            try:
+                app.leave_terminal()
+            finally:
+                app.shutdown()
     if error:
         if isinstance(error, SystemExit):
             raise error
