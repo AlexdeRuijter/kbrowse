@@ -200,6 +200,29 @@ class UrlTests(unittest.TestCase):
         self.assertEqual(len(set(kb.hint_labels(300))), 300)
 
 
+class ScreenshotPathTests(unittest.TestCase):
+    def test_paths(self):
+        import os, tempfile
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, {"HOME": home}):
+            downloads = os.path.join(home, "Downloads")
+            first = kb.screenshot_path()
+            self.assertEqual(os.path.dirname(first), downloads)
+            self.assertTrue(first.endswith(".png"))
+            open(first, "wb").close()
+            self.assertNotEqual(kb.screenshot_path(), first)  # same second: no clash
+            self.assertEqual(kb.screenshot_path("page"), os.path.join(downloads, "page.png"))
+            self.assertEqual(os.path.dirname(kb.screenshot_path("sub/")), os.path.join(downloads, "sub"))
+            open(os.path.join(downloads, "page.png"), "wb").close()
+            with self.assertRaises(OSError):
+                kb.screenshot_path("page.png")
+
+    def test_png_size(self):
+        header = b"\x89PNG\r\n\x1a\n" + b"\0\0\0\rIHDR" + (640).to_bytes(4, "big") + (480).to_bytes(4, "big")
+        self.assertEqual(kb.png_size(header), (640, 480))
+        self.assertEqual(kb.png_size(b"nope"), (0, 0))
+
+
 class LaunchTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("dbus-daemon") and shutil.which("dbus-send"), "needs dbus")
     def test_private_session_bus(self):
