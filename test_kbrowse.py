@@ -1,6 +1,11 @@
 """Unit tests for the parts of kbrowse that do not need a browser.
 Run with: python3 -m unittest test_kbrowse"""
 
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
 import unittest
 
 import kbrowse as kb
@@ -216,6 +221,34 @@ class ScreenshotPathTests(unittest.TestCase):
         header = b"\x89PNG\r\n\x1a\n" + b"\0\0\0\rIHDR" + (640).to_bytes(4, "big") + (480).to_bytes(4, "big")
         self.assertEqual(kb.png_size(header), (640, 480))
         self.assertEqual(kb.png_size(b"nope"), (0, 0))
+
+
+class LaunchTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("dbus-daemon") and shutil.which("dbus-send"), "needs dbus")
+    def test_private_session_bus(self):
+        proc, address = kb.start_session_bus(subprocess.DEVNULL)
+        try:
+            self.assertTrue(address.startswith("unix:"))
+            subprocess.run(["dbus-send", "--bus=" + address, "--print-reply", "--dest=org.freedesktop.DBus",
+                            "/org/freedesktop/DBus", "org.freedesktop.DBus.ListNames"],
+                           check=True, stdout=subprocess.DEVNULL, timeout=10)
+        finally:
+            proc.terminate()
+            proc.wait()
+
+    def test_stderr_goes_to_log(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "chrome.log")
+            with open(path, "ab") as log_file:
+                original = sys.stderr
+                with kb.StderrToLog(log_file):
+                    subprocess.run([sys.executable, "-c", "import os; os.write(2, b'noise')"], check=True)
+                    self.assertIsNot(sys.stderr, original)
+                self.assertIs(sys.stderr, original)
+            with open(path, "rb") as handle:
+                self.assertEqual(handle.read(), b"noise")
+            # fd 2 points back at the terminal (or wherever the tests' stderr goes).
+            self.assertEqual(os.fstat(2).st_ino, os.fstat(original.fileno()).st_ino)
 
 
 if __name__ == "__main__":

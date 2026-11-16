@@ -30,6 +30,8 @@ Cookies and logins are kept in a profile between runs. For Flatpak Chromium the 
 
 If a snap or apt Chromium crashes right away, add `--no-sandbox`. Don't add it for Flatpak, which brings its own sandbox. If something looks wrong, run with `--log /tmp/kb.log`; Chromium's own output goes to `/tmp/kb.log.chrome`.
 
+kbrowse needs no desktop session. When there is no session D-Bus (`DBUS_SESSION_BUS_ADDRESS` is unset, as under `sudo -iu`, plain ssh or cron), it starts a private one for the browser and stops it on exit, so you don't need `dbus-run-session`. Chromium's error messages never reach the terminal: they go to the `.chrome` log with `--log`, otherwise nowhere. The GPU, UPower and portal errors in that log are normal in Xvfb and harmless.
+
 To see which Chromium you are running, type `:version` inside kbrowse, or run `chromium --version`.
 
 ## Ad blocking
