@@ -58,6 +58,7 @@ kbrowse uses qutebrowser-style modes. In **normal mode**, keys drive the browser
 | `J` `K` (or `gt` `gT`) | Next / previous tab |
 | `d` | Close tab |
 | `yy` `yt` `ys` | Copy URL / title / selected text (to your Mac clipboard, over ssh) |
+| `gs` / `gS` | Save a screenshot of the visible page / the whole scrollable page |
 | `:` | Run a command, for example `:open -t example.com` or `:js document.title`. Up/Down recall earlier entries |
 | `:help` | List all commands and key bindings |
 | `:q`, `ZZ`, `Ctrl-q` | Quit |
@@ -89,6 +90,26 @@ To keep this safe:
 - **No escape codes.** All output is stripped of control characters before it reaches the terminal.
 
 TypeScript isn't supported yet.
+
+## Screenshots
+
+`gs` saves what you see as a PNG at full resolution (the device pixel ratio, so 2x on a Retina kitty) and `gS` saves the whole scrollable page. They run `:screenshot` and `:screenshot -f`, which also take a file or folder name, relative to `~/Downloads`:
+
+```
+:screenshot                 → ~/Downloads/kbrowse-20261116-134552.png
+:screenshot -f receipt      → ~/Downloads/receipt.png, the whole page
+:screenshot shots/          → a timestamped file in ~/Downloads/shots
+```
+
+kbrowse never overwrites a file. Very long pages are scaled down so that no side is over 16384 pixels, Chromium's limit.
+
+The file is saved where kbrowse runs, so on the VM when you use ssh. To get it to your Mac, run this on the VM in a kitty window (it works over `kitten ssh` and asks for confirmation in kitty):
+
+```
+kitten transfer ~/Downloads/kbrowse-20261116-134552.png ~/Downloads
+```
+
+The status line shows that command with the right path after each screenshot.
 
 ## Options
 

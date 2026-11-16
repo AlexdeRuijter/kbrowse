@@ -27,6 +27,7 @@ import json
 import os
 import re
 import select
+import shlex
 import shutil
 import signal
 import socket
@@ -1143,6 +1144,7 @@ COMMANDS = {
     "search-prev": ("", "Find the previous match"),
     "yank": ("url|title|selection", "Copy to the clipboard of the machine running kitty"),
     "js": ("[-main] CODE | [-main] -f SCRIPT", "Run JavaScript in the page (see README)"),
+    "screenshot": ("[-f] [FILE]", "Save the page as a PNG (default ~/Downloads); -f captures the whole page"),
     "cmd-set-text": ("TEXT", "Open the prompt with TEXT; {url} is the current URL"),
     "version": ("", "Show the Chromium version"),
     "help": ("", "List commands and key bindings"),
@@ -1166,6 +1168,7 @@ KEYS = {
     "n": "search-next", "N": "search-prev",
     "f": "hint", "F": "hint tab", "i": "insert", "gi": "focus-input",
     "yy": "yank url", "yt": "yank title", "ys": "yank selection",
+    "gs": "screenshot", "gS": "screenshot -f",
     "J": "tab-next", "gt": "tab-next", "K": "tab-prev", "gT": "tab-prev", "d": "close",
     "ZZ": "quit", "ZQ": "quit",
 }
@@ -1182,6 +1185,33 @@ def key_label(key):
     if key.mods & (Key.ALT | Key.SUPER):
         return None
     return key.name
+
+
+SCREENSHOT_MAX_PX = 16384  # Chromium's largest capture side
+
+
+def screenshot_path(name=""):
+    """Where :screenshot saves: NAME (a file or folder; relative to
+    ~/Downloads), or a timestamped file in ~/Downloads."""
+    downloads = os.path.expanduser("~/Downloads")
+    path = os.path.join(downloads, os.path.expanduser(name)) if name else downloads
+    if not name or name.endswith("/") or os.path.isdir(path):
+        stem = os.path.join(path, time.strftime("kbrowse-%Y%m%d-%H%M%S"))
+        path, n = stem + ".png", 1
+        while os.path.exists(path):
+            path, n = f"{stem}-{n}.png", n + 1
+    elif not path.lower().endswith(".png"):
+        path += ".png"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if os.path.exists(path):
+        raise OSError(f"{path} already exists")
+    return path
+
+
+def png_size(data):
+    if data[:8] == b"\x89PNG\r\n\x1a\n" and len(data) >= 24:
+        return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+    return 0, 0
 
 
 class App:
@@ -1854,6 +1884,48 @@ class App:
 
     def cmd_js(self, rest):
         self.js_command(rest)
+
+    def cmd_screenshot(self, rest):
+        words = rest.split(None, 1)
+        full = bool(words) and words[0] in ("-f", "--full")
+        if full:
+            words = words[1:]
+        try:
+            path = screenshot_path(words[0] if words else "")
+        except OSError as error:
+            return self.flash(f"screenshot: {error}")
+        tab = self.tab
+        if not tab or not tab.session:
+            return self.flash("screenshot: no page")
+        params = {"format": "png", "fromSurface": True}
+        if full:
+            # The whole scrollable page at the device pixel ratio, shrunk if
+            # it would be taller or wider than Chromium can capture at once.
+            try:
+                metrics = self.cdp.call("Page.getLayoutMetrics", session=tab.session)
+            except CDPError as error:
+                return self.flash(f"screenshot: {error}")
+            size = metrics.get("cssContentSize") or metrics.get("contentSize") or {}
+            width, height = max(int(size.get("width", 0)), 1), max(int(size.get("height", 0)), 1)
+            scale = min(1.0, SCREENSHOT_MAX_PX / (max(width, height) * self.scale))
+            params.update(captureBeyondViewport=True,
+                          clip={"x": 0, "y": 0, "width": width, "height": height, "scale": scale})
+        self.flash("Taking screenshot…", 30)
+
+        def done(reply):
+            if "error" in reply:
+                return self.flash(f"screenshot: {reply['error'].get('message')}")
+            data = base64.b64decode(reply.get("result", {}).get("data", ""))
+            try:
+                with open(path, "xb") as out:
+                    out.write(data)
+            except OSError as error:
+                return self.flash(f"screenshot: {error}")
+            width, height = png_size(data)
+            self.flash(f"Saved {width}x{height} screenshot to {path}  "
+                       f"(on your Mac: kitten transfer {shlex.quote(path)} ~/Downloads)", 10)
+
+        self.cdp.send("Page.captureScreenshot", params, tab.session, done)
 
     def cmd_cmd_set_text(self, rest):
         tab = self.tab
@@ -2531,7 +2603,7 @@ def main():
         description="Browse the web in kitty with a modern Chromium. Works over ssh.",
         epilog="Keys (normal mode): o/O open (new tab), go edit URL, f/F hints, i insert, gi first "
                "text field, j/k/h/l scroll, ctrl-d/u half page, gg/G top/bottom, H/L back/forward, "
-               "r reload, / ? n N search, J/K tabs, d close tab, yy copy URL, :q or ctrl-q quit. "
+               "r reload, / ? n N search, J/K tabs, d close tab, yy copy URL, gs/gS screenshot, :q or ctrl-q quit. "
                "Esc leaves insert mode.")
     parser.add_argument("url", nargs="?", help="page to open")
     parser.add_argument("--browser", help="Chromium/Chrome executable or Flatpak app id, e.g. "
